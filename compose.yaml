@@ -1,0 +1,25 @@
+services:
+  api:
+    build: .
+    ports: ["8001:8001"]
+    environment:
+      DATABASE_URL: postgres://postgres:dev@db:5432/capstone
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: capstone
+    volumes: [capstonedata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  capstonedata:
