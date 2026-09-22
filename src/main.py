@@ -3,8 +3,11 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from openai import OpenAI
 import psycopg
 import os
+import json
+import re
 
 load_dotenv()
 
@@ -16,6 +19,15 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 security = HTTPBearer()
+
+llm_client = OpenAI(
+    base_url=os.getenv("LLM_BASE_URL"),
+    api_key=os.getenv("LLM_API_KEY"),
+    timeout=30.0,
+)
+
+with open("prompts/summarize-v1.md", "r") as f:
+    SUMMARY_PROMPT = f.read()
 
 
 def get_connection():
@@ -60,6 +72,18 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         return user_response.user
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+def extract_json(raw_text):
+    text = raw_text.strip()
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1)
+    else:
+        brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+        if brace_match:
+            text = brace_match.group(0)
+    return json.loads(text)
 
 
 @app.get("/")
@@ -141,3 +165,42 @@ def list_assignments(user=Depends(verify_token)):
         }
         for r in rows
     ]
+
+
+# ---------- LLM SUMMARY ROUTE ----------
+
+@app.post("/assignments/{assignment_id}/summarize")
+def summarize_assignment(assignment_id: int, user=Depends(verify_token)):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT title, description FROM assignments WHERE id = %s", (assignment_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Assignment {assignment_id} not found")
+
+    title, description = row
+    user_content = f"Title: {title}\nDescription: {description or 'No description provided'}"
+
+    response = llm_client.chat.completions.create(
+        model=os.getenv("LLM_MODEL"),
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": SUMMARY_PROMPT},
+            {"role": "user", "content": user_content}
+        ]
+    )
+
+    raw_text = response.choices[0].message.content
+    print("RAW SUMMARY OUTPUT:", raw_text)
+    try:
+        data = extract_json(raw_text)
+        summary = data.get("summary")
+        if not summary:
+            raise ValueError("No summary field in response")
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=422, detail="Could not generate a valid summary")
+
+    return {"assignment_id": assignment_id, "summary": summary}
