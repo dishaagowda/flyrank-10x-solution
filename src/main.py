@@ -1,6 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from supabase import create_client, Client
 import psycopg
 import os
 
@@ -9,6 +11,11 @@ load_dotenv()
 app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+security = HTTPBearer()
 
 
 def get_connection():
@@ -41,17 +48,57 @@ class AssignmentCreate(BaseModel):
     description: str | None = None
 
 
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        user_response = supabase.auth.get_user(token)
+        return user_response.user
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
 @app.get("/")
 def root():
     return {
         "name": "Internship Assignment Tracker",
         "version": "1.0",
-        "endpoints": ["/assignments"]
+        "endpoints": ["/assignments", "/auth/signup", "/auth/login"]
     }
 
 
+# ---------- AUTH ROUTES ----------
+
+@app.post("/auth/signup", status_code=201)
+def signup(auth: AuthRequest):
+    if not auth.email or not auth.password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    try:
+        result = supabase.auth.sign_up({"email": auth.email, "password": auth.password})
+        return {"user": result.user}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/auth/login")
+def login(auth: AuthRequest):
+    if not auth.email or not auth.password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    try:
+        result = supabase.auth.sign_in_with_password({"email": auth.email, "password": auth.password})
+        return {"access_token": result.session.access_token}
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid login credentials")
+
+
+# ---------- ASSIGNMENT ROUTES (PROTECTED) ----------
+
 @app.post("/assignments", status_code=201)
-def create_assignment(assignment: AssignmentCreate):
+def create_assignment(assignment: AssignmentCreate, user=Depends(verify_token)):
     if not assignment.title.strip():
         raise HTTPException(status_code=400, detail="Title cannot be empty")
 
@@ -76,7 +123,7 @@ def create_assignment(assignment: AssignmentCreate):
 
 
 @app.get("/assignments")
-def list_assignments():
+def list_assignments(user=Depends(verify_token)):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, title, description, status, created_at FROM assignments ORDER BY id")
