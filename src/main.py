@@ -8,6 +8,10 @@ import psycopg
 import os
 import json
 import re
+from fastapi.responses import FileResponse
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
 load_dotenv()
 
@@ -204,3 +208,35 @@ def summarize_assignment(assignment_id: int, user=Depends(verify_token)):
         raise HTTPException(status_code=422, detail="Could not generate a valid summary")
 
     return {"assignment_id": assignment_id, "summary": summary}
+
+@app.get("/assignments/report")
+def generate_report(user=Depends(verify_token)):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, description, status, created_at FROM assignments ORDER BY id")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    output_path = "output/assignment_report.pdf"
+    doc = SimpleDocTemplate(output_path, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    elements.append(Paragraph("Internship Assignment Report", styles["Title"]))
+    elements.append(Spacer(1, 12))
+
+    if not rows:
+        elements.append(Paragraph("No assignments recorded yet.", styles["Normal"]))
+    else:
+        for row in rows:
+            assignment_id, title, description, status, created_at = row
+            elements.append(Paragraph(f"<b>{title}</b>", styles["Heading2"]))
+            elements.append(Paragraph(f"Status: {status}", styles["Normal"]))
+            elements.append(Paragraph(f"Description: {description or 'No description'}", styles["Normal"]))
+            elements.append(Paragraph(f"Created: {created_at.strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
+            elements.append(Spacer(1, 16))
+
+    doc.build(elements)
+
+    return FileResponse(output_path, media_type="application/pdf", filename="assignment_report.pdf")
